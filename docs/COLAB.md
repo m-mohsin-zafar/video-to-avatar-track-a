@@ -1,55 +1,108 @@
-# Colab: GVHMR SMPL lift
+# Colab + GVHMR
 
-The MacBook Air M4 cannot run official GVHMR (CUDA). Use a free T4 runtime.
+Upstream: https://github.com/zju3dv/GVHMR  
+Official Colab (2024 snapshot): https://colab.research.google.com/drive/1N9WSchizHv2bfQqkE9Wuiegw_OT7mtGj  
+In-repo notebook: `tools/demo/colab_demo.ipynb`
 
-## 1. Open a GPU notebook
+You are right: **that Colab is old relative to current Colab runtimes.**
+The paper code is still the right model. The notebook pins CUDA 12.1, `torch-scatter` for cu121, and compiles **DPVO**. Colab in 2026 is a newer Python + CUDA stack, so those cells often die on `pytorch3d` / `torch-scatter` / `CUDA_HOME`.
 
-1. https://colab.research.google.com
-2. Runtime → Change runtime type → **T4 GPU**
-3. Confirm:
+Good news for our clip: the camera is effectively static. GVHMR added **SimpleVO** (2025-03-08) and marked DPVO optional. For a phone-on-a-table / standing-in-place exercise you should **never compile DPVO**. Pass `-s`.
+
+## What to use instead of the official notebook as-is
+
+Pick one, in this order:
+
+### A. HuggingFace Space (zero install)
+
+https://huggingface.co/spaces/LittleFrog/GVHMR
+
+Upload the same mp4. If it finishes, download whatever motion file it offers. Fastest way to see if the lift is worth it. Limits apply.
+
+### B. Fresh Colab, skip the 2024 install cells
+
+1. New notebook, Runtime → **T4 GPU**.
+2. Do **not** run the official notebook's DPVO / torch-scatter / pytorch3d cells.
+3. Run a trimmed install:
 
 ```python
-import torch
-print(torch.cuda.is_available(), torch.cuda.get_device_name(0))
+!nvidia-smi
+!git clone --depth 1 https://github.com/zju3dv/GVHMR
+%cd GVHMR
+!pip install -q -r requirements.txt
+!pip install -q -e .
 ```
 
-## 2. Use the official GVHMR demo
+If `requirements.txt` pins an ancient torch, let Colab keep its preinstalled CUDA torch and only install the rest (`einops`, `hydra-core`, `pytorch-lightning`, `smplx`, `ultralytics`, `timm`, …). Fighting Colab's torch is how the old notebook dies.
 
-Follow the current GVHMR repo / Colab (search "GVHMR colab" — the project lives under `zju3dv` / `hyunsoocha` depending on the year).
+4. Weights (Google Drive folder linked from [INSTALL.md](https://github.com/zju3dv/GVHMR/blob/main/docs/INSTALL.md)):
 
-Required settings for this pipeline:
+```
+inputs/checkpoints/
+  gvhmr/gvhmr_siga24_release.ckpt
+  hmr2/epoch=10-step=25000.ckpt
+  vitpose/vitpose-h-multi-coco.pth
+  yolo/yolov8x.pt
+```
 
-- Upload the **same** exercise clip you ran through `pipeline.py` on the Mac
-- Enable **static camera** if the footage is on a tripod (`-s` in their CLI)
-- One person in frame
+5. SMPL / SMPL-X body models from MPI (sign up, academic license). Put:
 
-Export whatever file the demo writes (`hmr4d_results.pt` or a pack of numpy arrays).
+```
+inputs/checkpoints/body_models/smplx/SMPLX_NEUTRAL.npz
+inputs/checkpoints/body_models/smpl/SMPL_NEUTRAL.pkl
+```
 
-If the demo only dumps a `.pt`, add a cell:
+Do not commit those files to GitHub.
+
+6. Upload your clip, then:
+
+```bash
+python tools/demo/demo.py --video=/content/your_clip.mp4 -s
+```
+
+`-s` = static camera = no DPVO. That is the correct flag for the high-knee demo.
+
+7. Find the result `.pt` under `outputs/` and export:
 
 ```python
+from pathlib import Path
 import torch, numpy as np
 from google.colab import files
 
-blob = torch.load("hmr4d_results.pt", map_location="cpu")
-# inspect:
-print(type(blob), blob.keys() if isinstance(blob, dict) else "")
+pts = list(Path("outputs").rglob("*.pt"))
+print("\n".join(map(str, pts)))
+blob = torch.load(pts[0], map_location="cpu")
+print(type(blob), getattr(blob, "keys", lambda: None)())
 
-# Adjust keys to whatever that checkpoint actually uses:
-params = blob.get("smpl_params", blob)
-np.savez(
-    "gvhmr_smpl.npz",
-    body_pose=params["body_pose"].detach().cpu().numpy() if hasattr(params["body_pose"], "detach") else params["body_pose"],
-    global_orient=params["global_orient"].detach().cpu().numpy() if hasattr(params["global_orient"], "detach") else params["global_orient"],
-    transl=params["transl"].detach().cpu().numpy() if hasattr(params["transl"], "detach") else params["transl"],
-    betas=params["betas"].detach().cpu().numpy() if hasattr(params["betas"], "detach") else params["betas"],
-)
-files.download("gvhmr_smpl.npz")
+def to_np(x):
+    if hasattr(x, "detach"):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
+
+params = blob.get("smpl_params_incam", blob.get("smpl_params_global", blob.get("smpl_params", blob)))
+# print keys and pick the ones that exist
+if isinstance(params, dict):
+    print(params.keys())
+    pack = {}
+    for src, dst in [
+        ("body_pose", "body_pose"),
+        ("global_orient", "global_orient"),
+        ("transl", "transl"),
+        ("betas", "betas"),
+    ]:
+        if src in params:
+            pack[dst] = to_np(params[src])
+    np.savez("gvhmr_smpl.npz", **pack)
+    files.download("gvhmr_smpl.npz")
 ```
 
-SMPL / SMPL-X `.pkl` body models must be downloaded from the MPI sites (free academic license). GVHMR's README tells you where to put them. Do not commit those files here.
+Key names vary (`smpl_params_global` vs `incam`). Print `blob.keys()` and adapt. `scripts/ingest_smpl.py` on the Mac accepts any of `body_pose` / `pose_body`, `transl` / `trans`.
 
-## 3. Back on the Mac
+### C. Modernized fork (if official install keeps breaking)
+
+https://github.com/ryanrudes/gvhmr — same released weights, `uv` installer, DPVO optional. Still needs a CUDA box for the full stack; not for the M4 Air as the lift machine.
+
+## Back on the Mac
 
 ```bash
 python scripts/ingest_smpl.py \
@@ -57,8 +110,8 @@ python scripts/ingest_smpl.py \
   --gvhmr ~/Downloads/gvhmr_smpl.npz
 ```
 
-`smpl_ready` in the sidecar JSON should flip to `true`.
+Then [MAC_BLENDER.md](MAC_BLENDER.md).
 
-## 4. If Colab quota is gone
+## If Colab quota or weights fight you
 
-Use a paid markerless service (DeepMotion, QuickMagic, Rokoko Vision), download FBX, and skip ingest — go straight to [MAC_BLENDER.md](MAC_BLENDER.md).
+DeepMotion / QuickMagic / Rokoko Vision → FBX → Blender. Same Track A, paid lift.
