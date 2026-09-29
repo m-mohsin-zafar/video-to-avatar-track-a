@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+input/*
+!input/.gitkeep
+output/*
+!output/.gitkeep
+models/*.task
+*.mp4
+*.npz
+*.pkl
+*.pt
+_bot_work/
